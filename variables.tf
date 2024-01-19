@@ -10,22 +10,13 @@ variable "s3_bucket" {
 
 variable "s3_bucket_prefix" {
   type        = string
-  description = "Path inside the bucket where emails will be stored"
-}
-
-variable "mail_sender" {
-  type        = string
-  description = "Email used to send messages from (when forwarding)"
-}
-
-variable "mail_recipient" {
-  type        = string
-  description = "Email used to send messages to (when forwarding)"
+  description = "Path inside the bucket where emails will be stored, must contain trailing slash"
+  default     = ""
 }
 
 variable "aws_region" {
   type        = string
-  default     = "eu-west-1"
+  default     = "us-east-1"
   description = "AWS region where we should configure the integration"
 }
 
@@ -33,9 +24,8 @@ variable "domain" {
   type        = string
   description = "Domain to configure (ex: aleix.cloud)"
 }
-
-variable "dns_provider" {
-  type        = string
-  default     = "aws"
-  description = "DNS provider where the domain is registered."
+variable "emails" {
+  description = "Map of account_names to reciepent emails"
+  type        = map(string)
+  default     = {}
 }
