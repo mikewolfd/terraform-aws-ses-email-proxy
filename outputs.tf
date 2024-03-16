@@ -6,3 +6,7 @@ output "smtp_password" {
   }]
   sensitive = true
 }
+
+output "domain_identity" {
+  value = aws_ses_domain_identity.domain
+}
