@@ -4,7 +4,7 @@
   "description": "This module configures Amazon SES to forward emails to an existing account (gmail or something). This module will configure the following resources:",
   "main": "email-forward.test.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest"
   },
   "author": "",
   "license": "ISC",

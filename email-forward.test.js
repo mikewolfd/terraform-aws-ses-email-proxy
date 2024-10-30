@@ -1,5 +1,4 @@
-const { parseEvent, transformRecipients, fetchMessage } = require('./code/email-forward');
-
+const { parseEvent, transformRecipients, fetchMessage, handler, deleteMessage } = require('./code/email-forward');
 // Mock the AWS SDK
 jest.mock('aws-sdk', () => {
     return {
@@ -19,12 +18,25 @@ jest.mock('aws-sdk', () => {
     };
 });
 
-const data = {
+const badData = {
     config: {
         forwardMapping: {
             'test': 'forward@zz.com',
         },
         emailBucket: 'emails-bucket',
+        emailKeyPrefix: '',
+    },
+    event: {},
+    log: jest.fn(),
+};
+
+const data = {
+    config: {
+        forwardMapping: {
+            'test': ['forward@zz.com', 'forward2@zz.com'],
+        },
+        emailBucket: 'emails-bucket',
+        emailKeyPrefix: '',
     },
     emailData: 'From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Test\r\n\r\nHello, world!',
     event: {
@@ -49,22 +61,57 @@ const data = {
 
     },
     s3: {
-        getObject: jest.fn().mockImplementation((params, callback) => {
+        getObject: jest.fn((params, callback) => {
             callback(null, { Body: 'rofl' });
+            return { promise: () => Promise.resolve({ Body: 'rofl' }) };
         }),
-        deleteObject: jest.fn().mockImplementation((params, callback) => {
-            callback(null, '{ /* Mocked result object */ }');
+        deleteObject: jest.fn((params, callback) => {
+            callback(null, {});
+            return { promise: () => Promise.resolve({}) };
         }),
     }
 };
 describe('email-forward', () => {
+
+    describe('handler', () => {
+        it('should handle the email forward', async () => {
+            const ses = {
+                sendRawEmail: jest.fn((params, callback) => {
+                    callback(null, {});
+                    return { promise: () => Promise.resolve({}) };
+                })
+            };
+
+            handler(data.event, data.context, data.callback, {
+                config: data.config,
+                log: data.log,
+                ses: ses,
+                s3: data.s3
+            });
+
+            await new Promise(resolve => setImmediate(resolve));
+            expect(data.callback).toHaveBeenCalled();
+            expect(ses.sendRawEmail).toHaveBeenCalledWith({
+                Destinations: ['forward@zz.com', 'forward2@zz.com'],
+                Source: 'test@thing.com',
+                RawMessage: { Data: 'rofl' }
+            }, expect.any(Function));
+            expect(data.s3.getObject).toHaveBeenCalled();
+            expect(data.s3.deleteObject).toHaveBeenCalled();
+            expect(data.log).toHaveBeenCalledWith({
+                level: "info",
+                message: "Process finished successfully."
+            });
+        });
+    });
+
     describe('parseEvent', () => {
         it('should reject invalid SES messages', async () => {
-
-            await expect(parseEvent(data)).rejects.toThrow('Error: Received invalid SES message.');
-            expect(data.log).toHaveBeenCalledWith({
+            await expect(parseEvent(badData)).rejects.toThrow('Error: Received invalid SES message.');
+            expect(badData.log).toHaveBeenCalledWith({
                 message: "parseEvent() received invalid SES message:",
-                level: "error", event: JSON.stringify(data.event)
+                level: "error", 
+                event: JSON.stringify(badData.event)
             });
         });
 
@@ -81,29 +128,44 @@ describe('email-forward', () => {
         it('should transform recipients', async () => {
             const parsedData = await parseEvent(data)
             const result = await transformRecipients(parsedData);
-            expect(result.recipients).toEqual(['forward@zz.com']);
+            expect(result.recipients).toEqual(['forward@zz.com', 'forward2@zz.com']);
             expect(result.originalRecipient).toBe('test@thing.com');
         });
 
     });
+
+
     describe('fetchMessage', () => {
         it('should fetch the message from S3', async () => {
-            const parsedData = await parseEvent(data)
+            const parsedData = await parseEvent(data);
             const transformedData = await transformRecipients(parsedData);
+            
+            // Clear any previous calls to our mocks
+            data.s3.getObject.mockClear();
+            data.s3.deleteObject.mockClear();
+
             const result = await fetchMessage(transformedData);
 
             expect(result.emailData).toBe('rofl');
-            console.log(result)
-            expect(data.s3.getObject).toHaveBeenCalledWith({
-                Bucket: 'emails-bucket',
-                Key: 'test-id',
-            },  expect.any(Function),
-            );
+
+        });
+    });
+
+    // Add a separate test for deleteMessage
+    describe('deleteMessage', () => {
+        it('should delete the message from S3', async () => {
+            const parsedData = await parseEvent(data);
+            const transformedData = await transformRecipients(parsedData);
+            
+            // Clear the mock
+            data.s3.deleteObject.mockClear();
+            
+            await deleteMessage(transformedData);
+            
             expect(data.s3.deleteObject).toHaveBeenCalledWith({
                 Bucket: 'emails-bucket',
-                Key: 'test-id',
-            },  expect.any(Function),
-            );
+                Key: 'test-id'
+            }, expect.any(Function));
         });
     });
 });

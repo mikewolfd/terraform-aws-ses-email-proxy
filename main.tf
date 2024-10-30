@@ -29,7 +29,7 @@ resource "aws_iam_policy" "lambda_policy" {
                 "s3:DeleteObject"
             ],
             "Resource": [
-                "arn:aws:s3:::${var.s3_bucket}/${trimprefix(var.s3_bucket_prefix, "/")}${!endswith(var.s3_bucket_prefix,"/") && var.s3_bucket_prefix != "" ? "/" : ""}*"
+                "arn:aws:s3:::${var.s3_bucket}/${trimprefix(var.s3_bucket_prefix, "/")}${!endswith(var.s3_bucket_prefix, "/") && var.s3_bucket_prefix != "" ? "/" : ""}*"
             ]
         },
         {
@@ -38,7 +38,7 @@ resource "aws_iam_policy" "lambda_policy" {
             "Action": [
                 "ses:SendRawEmail"
             ],
-            "Resource": ${jsonencode([for item in aws_ses_email_identity.email: item.arn])}
+            "Resource": ${jsonencode([for item in aws_ses_email_identity.email : item.arn])}
         }
     ]
 }
@@ -88,7 +88,7 @@ resource "aws_lambda_function" "lambda_function" {
   environment {
     variables = {
       MailS3Bucket  = var.s3_bucket
-      MailS3Prefix  = "${trimprefix(var.s3_bucket_prefix, "/")}${!endswith(var.s3_bucket_prefix,"/") && var.s3_bucket_prefix != "" ? "/" : ""}"
+      MailS3Prefix  = "${trimprefix(var.s3_bucket_prefix, "/")}${!endswith(var.s3_bucket_prefix, "/") && var.s3_bucket_prefix != "" ? "/" : ""}"
       EmailsMapping = jsonencode(var.emails)
       Region        = var.aws_region
     }

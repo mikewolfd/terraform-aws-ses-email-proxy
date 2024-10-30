@@ -26,6 +26,6 @@ variable "domain" {
 }
 variable "emails" {
   description = "Map of account_names to reciepent emails"
-  type        = map(string)
+  type        = map(list(string))
   default     = {}
 }
