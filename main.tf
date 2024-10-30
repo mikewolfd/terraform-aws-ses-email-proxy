@@ -38,7 +38,7 @@ resource "aws_iam_policy" "lambda_policy" {
             "Action": [
                 "ses:SendRawEmail"
             ],
-            "Resource": ${jsonencode([for item in aws_ses_email_identity.email : item.arn])}
+            "Resource": ${jsonencode(concat([for item in aws_ses_email_identity.email : item.arn], [aws_ses_domain_identity.domain.arn]))}
         }
     ]
 }
