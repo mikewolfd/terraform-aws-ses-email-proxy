@@ -1,6 +1,8 @@
 "use strict";
 
 var AWS = require("aws-sdk");
+const { simpleParser } = require("mailparser"); // ADD THIS
+const MailComposer = require("nodemailer/lib/mail-composer"); // ADD THIS
 
 console.log("AWS Lambda SES Forwarder // @arithmetric // Version 5.1.0");
 
@@ -39,8 +41,11 @@ var defaultConfig = {
 };
 
 function sanitizeEmail(email) {
-  // Remove whitespace, newlines, tabs, and control characters
-  return email.replace(/[\s\r\n\t]+/g, "").trim();
+  if (typeof email !== "string") {
+    return ""; // Or handle as an error
+  }
+  // Remove all whitespace characters
+  return email.replace(/\s+/g, "");
 }
 
 /**
@@ -225,154 +230,191 @@ exports.deleteMessage = function (data) {
  *
  * @return {object} - Promise resolved with data.
  */
-exports.processMessage = function (data) {
-  const match = data.emailData.match(/^((?:.+\r?\n)*)\r?\n([\s\S]*)/m);
-  const header = match && match[1] ? match[1] : data.emailData;
-  const body = match && match[2] ? match[2] : "";
 
-  const emailData = {};
+exports.processMessage = async function (data) {
+  const originalEmailData = data.emailData;
+  const newEmailData = {};
 
-  for (const recipient in data.recipients) {
-    let from = "";
-    let recipientHeader = header;
-    // Add "Reply-To:" with the "From" address if it doesn't already exists
-    if (!/^reply-to:[\t ]?/im.test(recipientHeader)) {
-      const match = recipientHeader.match(
-        /^from:[\t ]?(.*(?:\r?\n\s+.*)*\r?\n)/im
-      );
-      from = match && match[1] ? match[1] : "";
-      if (from) {
-        // Extract just the email address from the From header and sanitize
-        const fromEmailMatch = from.match(/<([^>]+)>/);
-        let fromEmail = fromEmailMatch ? fromEmailMatch[1] : from.trim();
-        fromEmail = sanitizeEmail(fromEmail);
-        recipientHeader =
-          recipientHeader +
-          'Reply-To: "Original Sender" <' +
-          fromEmail +
-          ">\r\n";
+  try {
+    // 1. Parse the original raw email data
+    const parsedEmail = await simpleParser(originalEmailData);
+
+    for (const recipient in data.recipients) {
+      const toAddresses = data.recipients[recipient].map(sanitizeEmail);
+      const sanitizedRecipient = sanitizeEmail(recipient); // Used for the new 'From' address
+
+      const mailOptions = {
+        to: toAddresses,
+        headers: [], // For custom headers not covered by direct options
+      };
+
+      // 2. Body Content (text, html, attachments)
+      if (parsedEmail.text) {
+        mailOptions.text = parsedEmail.text;
+      }
+      if (parsedEmail.html) {
+        mailOptions.html = parsedEmail.html;
+      }
+      if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
+        mailOptions.attachments = parsedEmail.attachments
+          .map((att) => ({
+            filename: att.filename,
+            content: att.content, // Buffer from simpleParser
+            cid: att.cid,
+            contentDisposition: att.contentDisposition,
+          }))
+          .filter((att) => att.content !== undefined);
+      }
+
+      // 3. Determine original sender's information for Reply-To and X-Forwarded-For
+      let originalFromDisplayName = "Original Sender";
+      let originalFromEmail = ""; // This will be the actual email address part
+
+      const originalFromHeaderValue = parsedEmail.from?.value?.[0];
+      if (originalFromHeaderValue) {
+        originalFromDisplayName =
+          originalFromHeaderValue.name || originalFromDisplayName;
+        originalFromEmail = originalFromHeaderValue.address || "";
+      }
+      // Sanitize and provide a fallback for the original email address
+      originalFromEmail = sanitizeEmail(originalFromEmail || recipient);
+
+      // 4. Set "From" header: SES requires sending from a verified domain.
+      // The new 'From' will use the 'recipient' (which should be a verified email/domain)
+      // and include the original sender's name for clarity.
+      mailOptions.from = {
+        name: `${originalFromDisplayName} via ${
+          sanitizedRecipient.split("@")[0]
+        }`,
+        address: sanitizedRecipient,
+      };
+
+      // 5. Add "Reply-To" with the original "From" address if it doesn't already exist
+      if (!parsedEmail.headers.get("reply-to") && originalFromEmail) {
+        mailOptions.replyTo = {
+          name: originalFromDisplayName, // Use the parsed or default display name
+          address: originalFromEmail, // Use the sanitized original email address
+        };
         data.log({
           level: "info",
-          message: "Added Reply-To address of: " + fromEmail,
+          message: "Added Reply-To address of: " + originalFromEmail,
+        });
+      } else if (parsedEmail.headers.get("reply-to")) {
+        if (parsedEmail.replyTo) {
+          mailOptions.replyTo = parsedEmail.replyTo; // Use parsed replyTo object
+        }
+        data.log({
+          level: "info",
+          message: "Kept existing Reply-To address.",
         });
       } else {
         data.log({
           level: "info",
           message:
-            "Reply-To address not added because From address was not " +
-            "properly extracted.",
+            "Reply-To address not added: original From address was not " +
+            "properly extracted or an existing Reply-To was already present.",
         });
       }
-    }
 
-    // SES does not allow sending messages from an unverified address,
-    // so replace the message's "From:" header with the original
-    // recipient (which is a verified domain)
-    recipientHeader = recipientHeader.replace(
-      /^from:[\t ]?(.*(?:\r?\n\s+.*)*)/gim,
-      function (match, from) {
-        let fromText;
-        // Extract display name (if any) and sanitize recipient
-        let displayName = from.replace(/<.*?>/, "").trim();
-        let sanitizedRecipient = sanitizeEmail(recipient);
-        fromText =
-          'From: "' +
-          displayName +
-          " via " +
-          sanitizedRecipient.split("@")[0] +
-          '" <' +
-          sanitizedRecipient +
-          ">";
-        return fromText;
+      // 6. Add a prefix to the Subject
+      let subject = parsedEmail.subject || "";
+      if (data.config.subjectPrefix) {
+        subject = data.config.subjectPrefix + subject;
       }
-    );
+      mailOptions.subject = subject;
 
-    // Add a prefix to the Subject
-    if (data.config.subjectPrefix) {
-      recipientHeader = recipientHeader.replace(
-        /^subject:[\t ]?(.*)/gim,
-        function (match, subject) {
-          return "Subject: " + data.config.subjectPrefix + subject;
-        }
+      // 7. Set "Cc" recipients
+      if (data.ccRecipients && data.ccRecipients.length > 0) {
+        mailOptions.cc = data.ccRecipients.map(sanitizeEmail);
+      }
+
+      // 8. Add custom headers: List-Id and X-Forwarded-For
+      const listIdDomainPart = recipient.split("@")[1] || "unknown.domain";
+      const sanitizedListIdDomain = sanitizeEmail(listIdDomainPart);
+      mailOptions.headers.push({
+        key: "List-Id",
+        value: `Forwarded emails via ${sanitizedListIdDomain} <bounce.${sanitizedListIdDomain}>`,
+      });
+
+      mailOptions.headers.push({
+        key: "X-Forwarded-For",
+        value: originalFromEmail, // Already sanitized
+      });
+
+      // 9. Copy other relevant headers from the original email
+      // Exclude headers that are explicitly set, should be removed, or are better regenerated by MailComposer.
+      const excludedHeaders = new Set([
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "subject",
+        "reply-to", // Handled by mailOptions
+        "return-path",
+        "sender",
+        "message-id",
+        "dkim-signature", // To be removed/regenerated
+        "list-id",
+        "x-forwarded-for", // We are adding our own versions
+        // MailComposer handles these based on content:
+        "content-type",
+        "content-transfer-encoding",
+        "mime-version",
+        "date", // MailComposer will generate a new Date header
+      ]);
+
+      if (parsedEmail.headerLines) {
+        parsedEmail.headerLines.forEach((headerLine) => {
+          const key = headerLine.key.toLowerCase();
+          if (!excludedHeaders.has(key)) {
+            // Add the header using its original key casing and unfolded value
+            mailOptions.headers.push({
+              key: headerLine.key,
+              value: headerLine.value,
+            });
+          }
+        });
+      }
+
+      // Remove headers with undefined or null values
+      mailOptions.headers = mailOptions.headers.filter(
+        (h) => h.value !== undefined && h.value !== null
       );
-    }
 
-    // Replace original 'To' header with a manually defined one
-    // Sanitize all destination addresses
-    const sanitizedTo = data.recipients[recipient].map(sanitizeEmail).join(",");
-    recipientHeader = recipientHeader.replace(
-      /^to:[\t ]?(.*)/gim,
-      "To: " + sanitizedTo
-    );
-
-    // Remove the Return-Path header.
-    recipientHeader = recipientHeader.replace(
-      /^return-path:[\t ]?(.*)\r?\n/gim,
-      ""
-    );
-
-    // Remove Sender header.
-    recipientHeader = recipientHeader.replace(/^sender:[\t ]?(.*)\r?\n/gim, "");
-
-    // Remove Message-ID header.
-    recipientHeader = recipientHeader.replace(
-      /^message-id:[\t ]?(.*)\r?\n/gim,
-      ""
-    );
-
-    // Remove all DKIM-Signature headers to prevent triggering an
-    // "InvalidParameterValue: Duplicate header 'DKIM-Signature'" error.
-    // These signatures will likely be invalid anyways, since the From
-    // header was modified.
-    recipientHeader = recipientHeader.replace(
-      /^dkim-signature:[\t ]?.*\r?\n(\s+.*\r?\n)*/gim,
-      ""
-    );
-
-    recipientHeader = recipientHeader.replace(
-      /^list-id:[\t ]?.*\r?\n(\s+.*\r?\n)*/gim,
-      ""
-    );
-    // 1. Add a List-Id header to help with email filtering
-    recipientHeader =
-      recipientHeader.trim() +
-      "\r\nList-Id: Forwarded emails via " +
-      sanitizeEmail(recipient.split("@")[1]) +
-      " <bounce." +
-      sanitizeEmail(recipient.split("@")[1]) +
-      ">\r\n";
-
-    // // 2. Add X-Forwarded-For header to maintain transparency
-    recipientHeader = recipientHeader.replace(
-      /^x-forwarded-for:[\t ]?.*\r?\n(\s+.*\r?\n)*/gim,
-      ""
-    );
-    // Use sanitized fromEmail for X-Forwarded-For
-    let fromEmailForXFF = "";
-    if (from) {
-      const fromEmailMatch = from.match(/<([^>]+)>/);
-      fromEmailForXFF = fromEmailMatch ? fromEmailMatch[1] : from.trim();
-      fromEmailForXFF = sanitizeEmail(fromEmailForXFF);
-    }
-    recipientHeader =
-      recipientHeader.trim() +
-      "\r\nX-Forwarded-For: " +
-      fromEmailForXFF +
-      "\r\n";
-
-    if (data.ccRecipients.length > 0) {
-      // Remove existing CC header
-      // Sanitize all CC addresses
-      const sanitizedCC = data.ccRecipients.map(sanitizeEmail).join(",");
-      recipientHeader = recipientHeader.replace(
-        /^cc:[\t ]?(.*)\r?\n/gim,
-        "\r\nCC: " + sanitizedCC + "\r\n"
+      // Log all headers being added to mailOptions.headers
+      console.log(
+        "Headers being added to mailOptions.headers:",
+        mailOptions.headers
       );
+
+      // 10. Compile the new email
+      const mailComposer = new MailComposer(mailOptions);
+      const messageBuffer = await new Promise((resolve, reject) => {
+        mailComposer.compile().build((err, message) => {
+          if (err) {
+            console.log(mailOptions);
+            return reject(err);
+          }
+          resolve(message);
+        });
+      });
+
+      // Store the raw email string (as the original code did)
+      newEmailData[recipient] = messageBuffer.toString();
     }
-    emailData[recipient] = recipientHeader.trim() + "\r\n\r\n" + body;
+    data.emailData = newEmailData;
+    return data; // Promise.resolve(data) is implicit with async function
+  } catch (error) {
+    data.log({
+      level: "error",
+      message:
+        "Error processing message with MailParser/MailComposer: " +
+        (error.message || error),
+      error: error.stack,
+    });
+    // Re-throw the error to indicate failure, or handle as appropriate for your application
+    throw error;
   }
-  data.emailData = emailData;
-  return Promise.resolve(data);
 };
 
 /**
@@ -444,8 +486,8 @@ exports.sendMessage = function (data) {
  * @param {object} overrides - Overrides for the default data, including the
  * configuration, SES object, and S3 object.
  */
-exports.handler = function (event, context, callback, overrides) {
-  var steps =
+exports.handler = async function (event, context, callback, overrides) {
+  const steps =
     overrides && overrides.steps
       ? overrides.steps
       : [
@@ -456,7 +498,7 @@ exports.handler = function (event, context, callback, overrides) {
           exports.sendMessage,
           exports.deleteMessage,
         ];
-  var data = {
+  const data = {
     event: event,
     callback: callback,
     context: context,
@@ -468,32 +510,26 @@ exports.handler = function (event, context, callback, overrides) {
         ? overrides.s3
         : new AWS.S3({ signatureVersion: "v4" }),
   };
-  Promise.series(steps, data)
-    .then(function (data) {
-      data.log({
-        level: "info",
-        message: "Process finished successfully.",
-      });
-      return data.callback();
-    })
-    .catch(function (err) {
-      data.log({
-        level: "error",
-        message: "Step returned error: " + err.message,
-        error: err,
-        stack: err.stack,
-      });
-      return data.callback(new Error("Error: Step returned error."));
-    });
-};
-
-Promise.series = function (promises, initValue) {
-  return promises.reduce(function (chain, promise) {
-    if (typeof promise !== "function") {
-      return chain.then(() => {
-        throw new Error("Error: Invalid promise item: " + promise);
-      });
+  try {
+    let currentData = data;
+    for (const step of steps) {
+      if (typeof step !== "function") {
+        throw new Error("Error: Invalid promise item: " + step);
+      }
+      currentData = await step(currentData);
     }
-    return chain.then(promise);
-  }, Promise.resolve(initValue));
+    currentData.log({
+      level: "info",
+      message: "Process finished successfully.",
+    });
+    return currentData.callback();
+  } catch (err) {
+    data.log({
+      level: "error",
+      message: "Step returned error: " + err.message,
+      error: err,
+      stack: err.stack,
+    });
+    return data.callback(new Error("Error: Step returned error."));
+  }
 };

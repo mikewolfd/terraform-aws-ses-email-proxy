@@ -6,6 +6,7 @@ const {
   deleteMessage,
   processMessage,
 } = require("./code/email-forward");
+const { simpleParser } = require("mailparser");
 
 // Mock the AWS SDK
 jest.mock("aws-sdk", () => {
@@ -100,24 +101,33 @@ describe("email-forward", () => {
   });
   describe("handler", () => {
     it("should handle the email forward", async () => {
-      handler(data.event, data.context, data.callback, {
+      await handler(data.event, data.context, data.callback, {
         config: data.config,
         log: data.log,
         ses: data.ses,
         s3: data.s3,
       });
 
-      await new Promise((resolve) => setImmediate(resolve));
       expect(data.callback).toHaveBeenCalled();
-      expect(data.ses.sendRawEmail).toHaveBeenCalledWith(
-        {
-          Destinations: ["forward@zz.com", "forward2@zz.com"],
-          Source: "test@thing.com",
-          RawMessage: { Data: data.outputEmailData },
-        },
-        expect.any(Function)
-      );
       expect(data.ses.sendRawEmail).toHaveBeenCalledTimes(1);
+      const call = data.ses.sendRawEmail.mock.calls[0][0];
+      expect(call.Destinations).toEqual(["forward@zz.com", "forward2@zz.com"]);
+      expect(call.Source).toBe("test@thing.com");
+      // Parse the output email and check headers
+      const parsed = await simpleParser(call.RawMessage.Data);
+      console.log(parsed.headers);
+      expect(parsed.subject).toBe("Lorem Ipsum Test Email");
+      expect(parsed.from.text).toContain("Original Sender via test");
+      expect(parsed.to.text).toContain("forward@zz.com");
+      expect(parsed.to.text).toContain("forward2@zz.com");
+      expect(parsed.headers.get("x-forwarded-for")).toBe("sender@example.com");
+      expect(parsed.headers.get("list").id).toEqual({
+        name: "Forwarded emails via thing.com",
+        id: "bounce.thing.com",
+      });
+      expect(parsed.replyTo.text).toContain("sender@example.com");
+      expect(parsed.text).toContain("Dear valued recipient");
+      expect(parsed.text).toContain("Best regards");
       expect(data.s3.getObject).toHaveBeenCalled();
       expect(data.s3.deleteObject).toHaveBeenCalled();
       expect(data.log).toHaveBeenCalledWith({
@@ -155,55 +165,53 @@ describe("email-forward", () => {
           };
         }),
       };
-      handler(testData.event, testData.context, testData.callback, {
+      await handler(testData.event, testData.context, testData.callback, {
         config: testData.config,
         log: testData.log,
         ses: testData.ses,
         s3: s3,
       });
-      await new Promise((resolve) => setImmediate(resolve));
       expect(testData.callback).toHaveBeenCalled();
       expect(testData.ses.sendRawEmail).toHaveBeenCalledTimes(2);
-      expect(testData.ses.sendRawEmail).toHaveBeenCalledWith(
-        {
-          Destinations: ["forward@zz.com", "forward2@zz.com"],
-          Source: "test@thing.com",
-          RawMessage: {
-            Data:
-              `From: "sender@example.com via test" <test@thing.com>\r
-To: forward@zz.com,forward2@zz.com\r
-Subject: Lorem Ipsum Test Email\r
-Reply-To: "Original Sender" <sender@example.com>\r
-List-Id: Forwarded emails via thing.com <bounce.thing.com>\r
-X-Forwarded-For: sender@example.com\r
-\r
-` + emailBody,
-          },
-        },
-        expect.any(Function)
-      );
-      expect(testData.ses.sendRawEmail).toHaveBeenCalledWith(
-        {
-          Destinations: [
-            "forward@zz.com",
-            "forward2@zz.com",
-            "forward3@zz.com",
-          ],
-          Source: "test2@thing.com",
-          RawMessage: {
-            Data:
-              `From: "sender@example.com via test2" <test2@thing.com>\r
-To: forward@zz.com,forward2@zz.com,forward3@zz.com\r
-Subject: Lorem Ipsum Test Email\r
-Reply-To: "Original Sender" <sender@example.com>\r
-List-Id: Forwarded emails via thing.com <bounce.thing.com>\r
-X-Forwarded-For: sender@example.com\r
-\r
-` + emailBody,
-          },
-        },
-        expect.any(Function)
-      );
+      // Check first recipient
+      let call = testData.ses.sendRawEmail.mock.calls[0][0];
+      expect(call.Destinations).toEqual(["forward@zz.com", "forward2@zz.com"]);
+      expect(call.Source).toBe("test@thing.com");
+      let parsed = await simpleParser(call.RawMessage.Data);
+      expect(parsed.subject).toBe("Lorem Ipsum Test Email");
+      expect(parsed.from.text).toContain("Original Sender via test");
+      expect(parsed.to.text).toContain("forward@zz.com");
+      expect(parsed.to.text).toContain("forward2@zz.com");
+      expect(parsed.headers.get("x-forwarded-for")).toBe("sender@example.com");
+      expect(parsed.headers.get("list").id).toEqual({
+        name: "Forwarded emails via thing.com",
+        id: "bounce.thing.com",
+      });
+      expect(parsed.replyTo.text).toContain("sender@example.com");
+      expect(parsed.text).toContain("Dear valued recipient");
+      expect(parsed.text).toContain("Best regards");
+      // Check second recipient
+      call = testData.ses.sendRawEmail.mock.calls[1][0];
+      expect(call.Destinations).toEqual([
+        "forward@zz.com",
+        "forward2@zz.com",
+        "forward3@zz.com",
+      ]);
+      expect(call.Source).toBe("test2@thing.com");
+      parsed = await simpleParser(call.RawMessage.Data);
+      expect(parsed.subject).toBe("Lorem Ipsum Test Email");
+      expect(parsed.from.text).toContain("Original Sender via test2");
+      expect(parsed.to.text).toContain("forward@zz.com");
+      expect(parsed.to.text).toContain("forward2@zz.com");
+      expect(parsed.to.text).toContain("forward3@zz.com");
+      expect(parsed.headers.get("x-forwarded-for")).toBe("sender@example.com");
+      expect(parsed.headers.get("list").id).toEqual({
+        name: "Forwarded emails via thing.com",
+        id: "bounce.thing.com",
+      });
+      expect(parsed.replyTo.text).toContain("sender@example.com");
+      expect(parsed.text).toContain("Dear valued recipient");
+      expect(parsed.text).toContain("Best regards");
       expect(s3.getObject).toHaveBeenCalled();
       expect(s3.deleteObject).toHaveBeenCalled();
       expect(testData.log).toHaveBeenCalledWith({
@@ -239,7 +247,7 @@ X-Forwarded-For: sender@example.com\r
       const result = await processMessage(transformedData);
 
       expect(result.emailData["test@thing.com"]).toContain(
-        "\r\nCC: cc1@example.com,cc2@example.com\r\n"
+        "Cc: cc1@example.com, cc2@example.com"
       );
     });
   });

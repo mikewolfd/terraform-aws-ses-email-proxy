@@ -4,12 +4,15 @@
   "description": "This module configures Amazon SES to forward emails to an existing account (gmail or something). This module will configure the following resources:",
   "main": "email-forward.test.js",
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "build": "cd code && npm install"
   },
   "author": "",
   "license": "ISC",
   "devDependencies": {
     "aws-sdk": "^2.1539.0",
+    "mailparser": "^3.7.1",
+    "nodemailer": "^6.9.14",
     "jest": "^29.7.0"
   }
 }

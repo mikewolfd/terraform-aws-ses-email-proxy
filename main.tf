@@ -1,7 +1,14 @@
+resource "null_resource" "npm_install" {
+  provisioner "local-exec" {
+    command = "cd ${path.module}/code && npm install"
+  }
+}
+
 data "archive_file" "zipit" {
+  depends_on  = [null_resource.npm_install]
   type        = "zip"
-  source_file = local.code_file_path
-  output_path = "${local.code_file_path}.zip"
+  source_dir  = "${path.module}/code/"
+  output_path = "${path.module}/code.zip"
 }
 
 /** AWS account id */
@@ -76,7 +83,7 @@ resource "aws_iam_role_policy_attachment" "lambda_email_fw_attachment" {
 }
 
 resource "aws_lambda_function" "lambda_function" {
-  filename         = "${local.code_file_path}.zip"
+  filename         = data.archive_file.zipit.output_path
   function_name    = "${var.prefix}-function"
   role             = aws_iam_role.lambda_role.arn
   handler          = "email-forward.handler"

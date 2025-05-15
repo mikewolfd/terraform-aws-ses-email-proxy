@@ -1,0 +1,10 @@
+{
+  "name": "email-forwarder",
+  "version": "1.0.0",
+  "description": "Lambda function to forward SES emails",
+  "main": "email-forward.js",
+  "dependencies": {
+    "mailparser": "^3.7.1",
+    "nodemailer": "^6.9.14"
+  }
+}
